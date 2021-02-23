@@ -21,7 +21,8 @@ if os.environ.get('DISPLAY', '') == '':
 
 def plot_predicted_data(training_actual_df, predicted_df, date_col, actual_col,
                         pred_col='prediction', prediction_percentiles=None,
-                        title="", test_actual_df=None, is_visible=True, figsize=None, path=None, fontsize=None):
+                        title="", test_actual_df=None, is_visible=True, figsize=None,
+                        path=None, fontsize=None, linestyle_marker = '-'):
     """
     plot training actual response together with predicted data; if actual response of predicted
     data is there, plot it too.
@@ -51,6 +52,8 @@ def plot_predicted_data(training_actual_df, predicted_df, date_col, actual_col,
         path to save the figure
     fontsize: int
         fontsize of the title
+    test_linestyle: str
+        linestyle of prediction plot on test period
     Returns
     -------
         None.
@@ -93,7 +96,11 @@ def plot_predicted_data(training_actual_df, predicted_df, date_col, actual_col,
                label='train response')
     ax.plot(_predicted_df[date_col].values,
             _predicted_df[pred_col].values,
-            marker=None, color='#12939A', lw=2, label='prediction')
+            marker=None, linestyle=linestyle_marker, color='#12939A', lw=2, label='prediction')
+
+    #vertical line seperate training and prediction
+    ax.axvline(x = _training_actual_df[date_col].values[-1], color = '#1f77b4'
+               , linestyle = '--')
 
     if test_actual_df is not None:
         test_actual_df = test_actual_df.copy()
