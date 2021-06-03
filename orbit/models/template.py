@@ -1,9 +1,9 @@
 import custom_inherit as ci
-from copy import copy
+from copy import copy, deepcopy
 import numpy as np
 import pandas as pd
 
-from ..constants.constants import PredictMethod
+from ..constants.constants import PredictMethod, PredictionKeys
 from ..estimators.stan_estimator import StanEstimatorMCMC
 from ..utils.docstring_style import merge_numpy_docs_dedup
 from ..utils.predictions import prepend_date_column, compute_percentiles
@@ -17,12 +17,9 @@ ci.add_style("numpy_with_merge_dedup", merge_numpy_docs_dedup)
 
 class BaseTemplate(object, metaclass=ci.DocInheritMeta(style="numpy_with_merge_dedup")):
     """ Base abstract class for univariate time-series model creation
-
     `BaseTemplate` will instantiate an estimator class of `estimator_type`.
-
     Each model defines its own `_supported_estimator_types` to determine if
     the provided `estimator_type` is supported for that particular model.
-
     Parameters
     ----------
     response_col : str
@@ -31,7 +28,6 @@ class BaseTemplate(object, metaclass=ci.DocInheritMeta(style="numpy_with_merge_d
         Name of date variable column, default 'ds'
     estimator_type : orbit.BaseEstimator
         Any subclass of `orbit.BaseEstimator`
-
     Notes
     -----
     For attributes which are input by users and needed to mutate further downstream, we will introduce a
@@ -84,10 +80,14 @@ class BaseTemplate(object, metaclass=ci.DocInheritMeta(style="numpy_with_merge_d
         # set by `fit()`
         self._posterior_samples = dict()
         # init aggregate posteriors
-        self._aggregate_posteriors = {}
+        self._aggregate_posteriors = dict()
 
         # for full Bayesian, user can store full prediction array if requested
-        self.pred_array = None
+        self.prediction_array = None
+        self.prediction_input_meta = dict()
+
+        # storing metrics in training result meta
+        self._training_metrics = dict()
 
     # initialization related modules
     def _validate_supported_estimator_type(self):
@@ -219,7 +219,7 @@ class BaseTemplate(object, metaclass=ci.DocInheritMeta(style="numpy_with_merge_d
 
         # note that estimator will search for the .stan, .pyro model file based on the
         # estimator type and model_name provided
-        model_extract = estimator.fit(
+        model_extract, training_metrics = estimator.fit(
             model_name=model_name,
             model_param_names=model_param_names,
             data_input=data_input,
@@ -228,6 +228,7 @@ class BaseTemplate(object, metaclass=ci.DocInheritMeta(style="numpy_with_merge_d
         )
 
         self._posterior_samples = model_extract
+        self._training_metrics = training_metrics
 
     def get_prediction_df_meta(self, df):
         # get prediction df meta
@@ -248,22 +249,74 @@ class BaseTemplate(object, metaclass=ci.DocInheritMeta(style="numpy_with_merge_d
 
         return prediction_df_meta
 
-    def predict(self, df, decompose=False, **kwargs):
+    def get_posterior_samples(self):
+        return self._posterior_samples.copy()
+
+    def get_training_metrics(self):
+        return self._training_metrics.copy()
+
+    def get_prediction_input_meta(self, df):
+        # remove reference from original input
+        df = df.copy()
+
+        # get prediction df meta
+        prediction_input_meta = {
+            'date_array': pd.to_datetime(df[self.date_col]).reset_index(drop=True),
+            'df_length': len(df.index),
+            'prediction_start': df[self.date_col].iloc[0],
+            'prediction_end': df[self.date_col].iloc[-1],
+        }
+
+        if not is_ordered_datetime(prediction_input_meta['date_array']):
+            raise IllegalArgument('Datetime index must be ordered and not repeat')
+
+        # TODO: validate that all regressor columns are present, if any
+
+        if prediction_input_meta['prediction_start'] < self.training_start:
+            raise PredictionException('Prediction start must be after training start.')
+
+        trained_len = self.num_of_observations
+
+        # If we cannot find a match of prediction range, assume prediction starts right after train
+        # end
+        if prediction_input_meta['prediction_start'] > self.training_end:
+            forecast_dates = set(prediction_input_meta['date_array'])
+            n_forecast_steps = len(forecast_dates)
+            # time index for prediction start
+            start = trained_len
+        else:
+            # compute how many steps to forecast
+            forecast_dates = \
+                set(prediction_input_meta['date_array']) - set(self.date_array)
+            # check if prediction df is a subset of training df
+            # e.g. "negative" forecast steps
+            n_forecast_steps = len(forecast_dates) or - (
+                len(set(self.date_array) - set(prediction_input_meta['date_array']))
+            )
+            # time index for prediction start
+            start = pd.Index(
+                self.date_array).get_loc(prediction_input_meta['prediction_start'])
+
+        prediction_input_meta.update({
+            'start': start,
+            'n_forecast_steps': n_forecast_steps,
+        })
+
+        self.prediction_input_meta = prediction_input_meta
+
+    def predict(self, df, **kwargs):
         """Predict interface for users"""
         raise AbstractMethodException("Abstract method.  Model should implement concrete .predict().")
 
-    def _predict(self, posterior_estimates, df, include_error=False, decompose=False, store_prediction_array=False,
-                 **kwargs):
+    def _predict(self, posterior_estimates, df, include_error=False, **kwargs):
         """Inner predict being called internal for different prediction purpose such as bootstrapping"""
         raise AbstractMethodException("Abstract method.  Model should implement concrete ._predict().")
 
 
 class MAPTemplate(BaseTemplate):
     """ Abstract class for MAP (Maximum a Posteriori) prediction
-
     In this module, prediction is based on Maximum a Posteriori (aka Mode) of the posterior.
     This template only supports MAP inference.
-
     Parameters
     ----------
     n_bootstrap_draws : int
@@ -322,62 +375,53 @@ class MAPTemplate(BaseTemplate):
         # raise if model is not fitted
         if not self.is_fitted():
             raise PredictionException("Model is not fitted yet.")
+        # obtain basic meta data from input df
+        self.get_prediction_input_meta(df)
 
+        # perform point prediction
         aggregate_posteriors = self._aggregate_posteriors.get(PredictMethod.MAP.value)
-        if self.n_bootstrap_draws > 0:
-            # compute inference
+        point_predicted_dict = self._predict(
+            posterior_estimates=aggregate_posteriors, df=df, include_error=False, **kwargs
+        )
+        for k, v in point_predicted_dict.items():
+            point_predicted_dict[k] = np.squeeze(v, 0)
+
+        # to derive confidence interval; the condition should be sufficient since we add [50] by default
+        if self.n_bootstrap_draws > 0 and len(self._prediction_percentiles) > 1:
+            # perform bootstrap; we don't have posterior samples. hence, we just repeat the draw here.
             posterior_samples = {}
             for k, v in aggregate_posteriors.items():
-                # in_shape = v.shape[1:]
-                # create and np.tile on first (batch) dimension
                 posterior_samples[k] = np.repeat(v, self.n_bootstrap_draws, axis=0)
-
-            # to derive confidence interval
             predicted_dict = self._predict(
-                posterior_estimates=posterior_samples, df=df, decompose=decompose, include_error=True, **kwargs
+                posterior_estimates=posterior_samples, df=df, include_error=True, **kwargs
             )
-            aggregated_df = compute_percentiles(predicted_dict, self._prediction_percentiles)
-            aggregated_df = prepend_date_column(aggregated_df, df, self.date_col)
+            percentiles_dict = compute_percentiles(predicted_dict, self._prediction_percentiles)
+            # replace mid point prediction by point estimate
+            percentiles_dict.update(point_predicted_dict)
 
-            # compute the original prediction
-            predicted_dict = self._predict(
-                posterior_estimates=aggregate_posteriors,
-                df=df,
-                include_error=False,
-                store_prediction_array=False,
-                **kwargs
-            )
-            # replace the mid-point (i.e., 50) estimation
-            for k, v in predicted_dict.items():
-                aggregated_df[k] = v.flatten()
+            if PredictionKeys.PREDICTION.value not in percentiles_dict.keys():
+                raise PredictionException("cannot find the key:'{}' from return of _predict()".format(
+                    PredictionKeys.PREDICTION.value))
 
-            return aggregated_df
+            # reduce to prediction only if decompose is not requested
+            if not decompose:
+                k = PredictionKeys.PREDICTION.value
+                reduced_keys = [k + "_" + str(p) if p != 50 else k for p in self._prediction_percentiles]
+                percentiles_dict = {k: v for k, v in percentiles_dict.items() if k in reduced_keys}
+            predicted_df = pd.DataFrame(percentiles_dict)
         else:
-            predicted_dict = self._predict(
-                posterior_estimates=aggregate_posteriors,
-                df=df,
-                decompose=decompose,
-                include_error=False,
-                store_prediction_array=False,
-                **kwargs
-            )
-            for k, v in predicted_dict.items():
-                predicted_dict[k] = v.flatten()
+            predicted_df = pd.DataFrame(point_predicted_dict)
 
-            predicted_df = pd.DataFrame(predicted_dict)
-            predicted_df = prepend_date_column(predicted_df, df, self.date_col)
-
-            return predicted_df
+        predicted_df = prepend_date_column(predicted_df, df, self.date_col)
+        return predicted_df
 
 
 class FullBayesianTemplate(BaseTemplate):
     """ Abstract class for full Bayesian prediction
-
     In full prediction, the prediction occurs as a function of each parameter posterior sample,
     and the prediction results are aggregated after prediction. Prediction will
     always return the median (aka 50th percentile) along with any additional percentiles that
     are specified.
-
     Parameters
     ----------
     n_bootstrap_draws : int
@@ -420,12 +464,10 @@ class FullBayesianTemplate(BaseTemplate):
     @staticmethod
     def _bootstrap(num_samples, posterior_samples, n):
         """Draw `n` number of bootstrap samples from the posterior_samples.
-
         Args
         ----
         n : int
             The number of bootstrap samples to draw
-
         """
         if n < 2:
             raise IllegalArgument("Error: Number of bootstrap draws must be at least 2")
@@ -461,6 +503,9 @@ class FullBayesianTemplate(BaseTemplate):
         # raise if model is not fitted
         if not self.is_fitted():
             raise PredictionException("Model is not fitted yet.")
+        # obtain basic meta data from input df
+        self.get_prediction_input_meta(df)
+
         # if bootstrap draws, replace posterior samples with bootstrap
         posterior_samples = self._bootstrap(
             num_samples=self.estimator.num_sample,
@@ -469,24 +514,29 @@ class FullBayesianTemplate(BaseTemplate):
         ) if self._n_bootstrap_draws > 1 else self._posterior_samples
 
         predicted_dict = self._predict(
-            posterior_estimates=posterior_samples,
-            df=df,
-            decompose=decompose,
-            include_error=True,
-            store_prediction_array=store_prediction_array,
-            **kwargs
+            posterior_estimates=posterior_samples, df=df, include_error=True, **kwargs
         )
-        aggregated_df = compute_percentiles(predicted_dict, self._prediction_percentiles)
-        aggregated_df = prepend_date_column(aggregated_df, df, self.date_col)
-        return aggregated_df
+
+        if PredictionKeys.PREDICTION.value not in predicted_dict.keys():
+            raise PredictionException("cannot find the key:'{}' from return of _predict()".format(
+                PredictionKeys.PREDICTION.value))
+
+        # reduce to prediction only if decompose is not requested
+        if not decompose:
+            predicted_dict = {k: v for k, v in predicted_dict.items() if k == PredictionKeys.PREDICTION.value}
+
+        if store_prediction_array:
+            self.prediction_array = predicted_dict[PredictionKeys.PREDICTION.value]
+        percentiles_dict = compute_percentiles(predicted_dict, self._prediction_percentiles)
+        predicted_df = pd.DataFrame(percentiles_dict)
+        predicted_df = prepend_date_column(predicted_df, df, self.date_col)
+        return predicted_df
 
 
 class AggregatedPosteriorTemplate(BaseTemplate):
     """ Abstract class for full aggregated posteriors prediction
-
     In aggregated prediction, the parameter posterior samples are reduced using `aggregate_method`
     before performing a single prediction. This template only supports aggregated posterior inference.
-
     Parameters
     ----------
     aggregate_method : { 'mean', 'median' }
@@ -563,52 +613,42 @@ class AggregatedPosteriorTemplate(BaseTemplate):
         # raise if model is not fitted
         if not self.is_fitted():
             raise PredictionException("Model is not fitted yet.")
+        # obtain basic meta data from input df
+        self.get_prediction_input_meta(df)
 
+        # perform point prediction
         aggregate_posteriors = self._aggregate_posteriors.get(self.aggregate_method)
+        point_predicted_dict = self._predict(
+            posterior_estimates=aggregate_posteriors, df=df, include_error=False, **kwargs
+        )
+        for k, v in point_predicted_dict.items():
+            point_predicted_dict[k] = np.squeeze(v, 0)
 
-        if self.n_bootstrap_draws > 0:
-            # compute inference
+        # to derive confidence interval; the condition should be sufficient since we add [50] by default
+        if self.n_bootstrap_draws > 0 and len(self._prediction_percentiles) > 1:
+            # perform bootstrap; we don't have posterior samples. hence, we just repeat the draw here.
             posterior_samples = {}
             for k, v in aggregate_posteriors.items():
-                # in_shape = v.shape[1:]
-                # create and np.tile on first (batch) dimension
                 posterior_samples[k] = np.repeat(v, self.n_bootstrap_draws, axis=0)
-
-            # to derive confidence interval
             predicted_dict = self._predict(
-                posterior_estimates=posterior_samples,
-                df=df,
-                decompose=decompose,
-                include_error=True, **kwargs
+                posterior_estimates=posterior_samples, df=df, include_error=True, **kwargs
             )
-            aggregated_df = compute_percentiles(predicted_dict, self._prediction_percentiles)
-            aggregated_df = prepend_date_column(aggregated_df, df, self.date_col)
-            # compute the original prediction
-            predicted_dict = self._predict(
-                posterior_estimates=aggregate_posteriors,
-                df=df,
-                include_error=False,
-                store_prediction_array=False,
-                **kwargs)
-            # replace the mid-point (i.e., 50) estimation
-            for k, v in predicted_dict.items():
-                aggregated_df[k] = v.flatten()
+            percentiles_dict = compute_percentiles(predicted_dict, self._prediction_percentiles)
+            # replace mid point prediction by point estimate
+            percentiles_dict.update(point_predicted_dict)
 
-            return aggregated_df
+            if PredictionKeys.PREDICTION.value not in percentiles_dict.keys():
+                raise PredictionException("cannot find the key:'{}' from return of _predict()".format(
+                    PredictionKeys.PREDICTION.value))
+
+            # reduce to prediction only if decompose is not requested
+            if not decompose:
+                k = PredictionKeys.PREDICTION.value
+                reduced_keys = [k + "_" + str(p) if p != 50 else k for p in self._prediction_percentiles]
+                percentiles_dict = {k: v for k, v in percentiles_dict.items() if k in reduced_keys}
+            predicted_df = pd.DataFrame(percentiles_dict)
         else:
-            predicted_dict = self._predict(
-                posterior_estimates=aggregate_posteriors,
-                df=df,
-                decompose=decompose,
-                include_error=False,
-                store_prediction_array=False,
-                **kwargs
-            )
-            for k, v in predicted_dict.items():
-                predicted_dict[k] = v.flatten()
+            predicted_df = pd.DataFrame(point_predicted_dict)
 
-            predicted_df = pd.DataFrame(predicted_dict)
-            predicted_df = prepend_date_column(predicted_df, df, self.date_col)
-
-            return predicted_df
-
+        predicted_df = prepend_date_column(predicted_df, df, self.date_col)
+        return predicted_df

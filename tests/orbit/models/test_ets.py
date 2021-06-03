@@ -4,7 +4,7 @@ from copy import copy
 
 from orbit.estimators.stan_estimator import StanEstimatorMCMC, StanEstimatorVI, StanEstimatorMAP
 from orbit.models.ets import ETSMAP, ETSFull, ETSAggregated
-from orbit.constants.constants import PredictedComponents
+from orbit.constants.constants import PredictionKeys
 from orbit.initializer.ets import ETSInitializer
 
 
@@ -55,7 +55,7 @@ def test_ets_full_seasonal_fit(synthetic_data, estimator_type):
 
     expected_columns = ['week', 'prediction_5', 'prediction', 'prediction_95']
     expected_shape = (51, len(expected_columns))
-    expected_num_parameters = 6
+    expected_num_parameters = 5
 
     assert predict_df.shape == expected_shape
     assert predict_df.columns.tolist() == expected_columns
@@ -88,7 +88,7 @@ def test_ets_aggregated_seasonal_fit(synthetic_data, estimator_type):
 
     expected_columns = ['week', 'prediction_5', 'prediction', 'prediction_95']
     expected_shape = (51, len(expected_columns))
-    expected_num_parameters = 6
+    expected_num_parameters = 5
 
     assert predict_df.shape == expected_shape
     assert predict_df.columns.tolist() == expected_columns
@@ -142,7 +142,7 @@ def test_ets_non_seasonal_fit(synthetic_data, estimator_type):
 
     expected_columns = ['week', 'prediction_5', 'prediction', 'prediction_95']
     expected_shape = (51, len(expected_columns))
-    expected_num_parameters = 4
+    expected_num_parameters = 3
 
     assert predict_df.shape == expected_shape
     assert predict_df.columns.tolist() == expected_columns
@@ -177,8 +177,8 @@ def test_full_prediction_percentiles(iclaims_training_data, prediction_percentil
     predicted_df = ets.predict(df, decompose=True)
     plot_components = [
         'prediction',
-        PredictedComponents.TREND.value,
-        PredictedComponents.SEASONALITY.value]
+        PredictionKeys.TREND.value,
+        PredictionKeys.SEASONALITY.value]
 
     expected_columns = ['week']
     for pc in plot_components:
@@ -216,8 +216,8 @@ def test_map_prediction_percentiles(iclaims_training_data, prediction_percentile
     predicted_df = ets.predict(df, decompose=True)
     predicted_components = [
         'prediction',
-        PredictedComponents.TREND.value,
-        PredictedComponents.SEASONALITY.value]
+        PredictionKeys.TREND.value,
+        PredictionKeys.SEASONALITY.value]
     expected_columns = ['week']
     for pc in predicted_components:
         for p in p_labels:

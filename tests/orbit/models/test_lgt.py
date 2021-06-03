@@ -5,8 +5,9 @@ import numpy as np
 from orbit.estimators.pyro_estimator import PyroEstimator, PyroEstimatorVI, PyroEstimatorMAP
 from orbit.estimators.stan_estimator import StanEstimator, StanEstimatorMCMC, StanEstimatorVI, StanEstimatorMAP
 from orbit.models.lgt import LGTMAP, LGTFull, LGTAggregated
-from orbit.constants.constants import PredictedComponents
+from orbit.constants.constants import PredictionKeys
 from orbit.initializer.lgt import LGTInitializer
+from orbit.diagnostics.backtest import grid_search_orbit
 
 
 @pytest.mark.parametrize("model_class", [LGTMAP, LGTFull, LGTAggregated])
@@ -39,15 +40,15 @@ def test_lgt_full_fit(synthetic_data, seasonality, estimator_type):
         'prediction_percentiles': [5, 95],
         'seasonality': seasonality,
         'verbose': False,
-        'estimator_type': estimator_type
+        'estimator_type': estimator_type,
     }
+
     if issubclass(estimator_type, StanEstimator):
-        expected_num_parameters = 11
-        args.update({'num_warmup': 50})
-    else:
-        # no `lp__` in pyro
-        expected_num_parameters = 10
+        args.update({'num_warmup': 50, 'num_sample': 50})
+    elif issubclass(estimator_type, PyroEstimator):
         args.update({'num_steps': 10})
+
+    expected_num_parameters = 10
 
     if seasonality == 52:
         expected_num_parameters += 2
@@ -56,7 +57,6 @@ def test_lgt_full_fit(synthetic_data, seasonality, estimator_type):
     lgt.fit(train_df)
     init_call = lgt.get_init_values()
     if seasonality:
-
         assert isinstance(init_call, LGTInitializer)
         assert init_call.s == 52
         init_values = init_call()
@@ -84,16 +84,14 @@ def test_lgt_aggregated_fit(synthetic_data, seasonality, estimator_type):
         'prediction_percentiles': [5, 95],
         'seasonality': seasonality,
         'verbose': False,
-        'estimator_type': estimator_type
+        'estimator_type': estimator_type,
     }
-
     if issubclass(estimator_type, StanEstimator):
-        expected_num_parameters = 11
-        args.update({'num_warmup': 50})
-    else:
-        # no `lp__` in pyro
-        expected_num_parameters = 10
-        args.update({'num_steps': 10})
+        args.update({'num_warmup': 50, 'num_sample': 50})
+    elif issubclass(estimator_type, PyroEstimator):
+        args.update({'num_steps': 10, 'num_sample': 50})
+
+    expected_num_parameters = 10
 
     if seasonality == 52:
         expected_num_parameters += 2
@@ -102,7 +100,6 @@ def test_lgt_aggregated_fit(synthetic_data, seasonality, estimator_type):
     lgt.fit(train_df)
     init_call = lgt.get_init_values()
     if seasonality:
-
         assert isinstance(init_call, LGTInitializer)
         assert init_call.s == 52
         init_values = init_call()
@@ -135,7 +132,6 @@ def test_lgt_map_fit(synthetic_data, seasonality, estimator_type):
     lgt.fit(train_df)
     init_call = lgt.get_init_values()
     if seasonality:
-
         assert isinstance(init_call, LGTInitializer)
         assert init_call.s == 52
         init_values = init_call()
@@ -179,6 +175,7 @@ def test_lgt_full_with_regression(synthetic_data, estimator_type, regressor_sign
             prediction_percentiles=[5, 95],
             seasonality=52,
             num_warmup=50,
+            num_sample=50,
             verbose=False,
             estimator_type=estimator_type
         )
@@ -235,6 +232,7 @@ def test_lgt_aggregated_with_regression(synthetic_data, estimator_type, regresso
             regressor_sign=regressor_signs,
             seasonality=52,
             num_warmup=50,
+            num_sample=50,
             verbose=False,
             estimator_type=estimator_type
         )
@@ -281,7 +279,7 @@ def test_lgt_mixed_signs_and_order(iclaims_training_data, regressor_signs):
     raw_regressor_col = ['trend.unemploy', 'trend.filling', 'trend.job']
     new_regressor_col = [raw_regressor_col[idx] for idx in [2, 1, 0]]
     new_regressor_signs = [regressor_signs[idx] for idx in [2, 1, 0]]
-    # mixiing ordering of cols in df of prediction
+    # mixing ordering of cols in df of prediction
     new_df = df[['claims', 'week'] + new_regressor_col]
 
     lgt = LGTMAP(
@@ -328,6 +326,8 @@ def test_prediction_percentiles(iclaims_training_data, prediction_percentiles):
         response_col='claims',
         date_col='week',
         seasonality=52,
+        num_warmup=50,
+        num_sample=50,
         seed=8888,
         prediction_percentiles=prediction_percentiles,
     )
@@ -346,9 +346,9 @@ def test_prediction_percentiles(iclaims_training_data, prediction_percentiles):
     predicted_df = lgt.predict(df, decompose=True)
     predicted_components = [
         'prediction',
-        PredictedComponents.TREND.value,
-        PredictedComponents.SEASONALITY.value,
-        PredictedComponents.REGRESSION.value]
+        PredictionKeys.TREND.value,
+        PredictionKeys.SEASONALITY.value,
+        PredictionKeys.REGRESSION.value]
 
     expected_columns = ['week']
     for pc in predicted_components:
@@ -380,6 +380,7 @@ def test_lgt_full_reproducibility(synthetic_data, estimator_type, regressor_sign
         prediction_percentiles=[5, 95],
         seasonality=seasonality,
         num_warmup=50,
+        num_sample=50,
         verbose=False,
         estimator_type=estimator_type
     )
@@ -401,6 +402,7 @@ def test_lgt_full_reproducibility(synthetic_data, estimator_type, regressor_sign
         prediction_percentiles=[5, 95],
         seasonality=seasonality,
         num_warmup=50,
+        num_sample=50,
         verbose=False,
         estimator_type=estimator_type
     )
@@ -499,3 +501,34 @@ def test_lgt_fixed_sm_input(synthetic_data, level_sm_input, seasonality_sm_input
     assert regression_out.shape == expected_regression_shape
     assert num_regressors == len(train_df.columns.tolist()[2:])
 
+@pytest.mark.parametrize("param_grid", [
+                                            {
+                                                'level_sm_input': [0.3, 0.5, 0.8],
+                                                'seasonality_sm_input': [0.3, 0.5, 0.8],
+                                            },
+                                            {
+                                                'level_sm_input': [0.3, 0.5, 0.8],
+                                                'slope_sm_input': [0.3, 0.5, 0.8],
+                                            }
+                                       ])
+def test_lgt_grid_tuning(synthetic_data, param_grid):
+    train_df, test_df, coef = synthetic_data
+    args = {
+        'response_col': 'response',
+        'date_col': 'week',
+        'seasonality': 52
+    }
+
+    lgt = LGTMAP(**args)
+
+    best_params, tuned_df = grid_search_orbit(param_grid,
+                                        model=lgt,
+                                        df=train_df,
+                                        min_train_len=80, incremental_len=20, forecast_len=20,
+                                        metrics=None, criteria=None, verbose=True)
+
+
+
+    assert best_params[0].keys() == param_grid.keys()
+    assert set(tuned_df.columns.to_list()) == set(list(param_grid.keys()) + ['metrics'])
+    assert tuned_df.shape == (9, 3)

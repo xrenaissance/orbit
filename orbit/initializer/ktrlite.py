@@ -13,5 +13,4 @@ class KTRLiteInitializer(object):
             init_values[constants.RegressionSamplingParameters.COEFFICIENTS_KNOT.value] = np.zeros(
                 (self.num_regressor, self.num_knots_coefficients)
             )
-
         return init_values

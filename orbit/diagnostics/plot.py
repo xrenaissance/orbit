@@ -1,29 +1,25 @@
 # the following lines are added to fix unit test error
 # or else the following line will give the following error
 # TclError: no display name and no $DISPLAY environment variable
-import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
-import os
 import pandas as pd
 import numpy as np
 from copy import deepcopy
+import arviz as az
 
-from orbit.constants.constants import PredictedComponents
-from orbit.utils.general import is_empty_dataframe
+from orbit.constants.constants import PredictionKeys
+from orbit.utils.general import is_empty_dataframe, is_ordered_datetime
 from orbit.constants.palette import QualitativePalette
 
-
-# if os.environ.get('DISPLAY', '') == '':
-#     print('no display found. Using non-interactive Agg backend')
-#     matplotlib.use('Agg')
+az.style.use("arviz-darkgrid")
 
 
 def plot_predicted_data(training_actual_df, predicted_df, date_col, actual_col,
-                        pred_col='prediction', prediction_percentiles=None,
+                        pred_col=PredictionKeys.PREDICTION.value, prediction_percentiles=None,
                         title="", test_actual_df=None, is_visible=True,
                         figsize=None, path=None, fontsize=None,
-                        insample_line=False, markersize=70, lw=2, linestyle='-'):
+                        line_plot=False, markersize=70, lw=2, linestyle='-'):
     """
     plot training actual response together with predicted data; if actual response of predicted
     data is there, plot it too.
@@ -53,8 +49,8 @@ def plot_predicted_data(training_actual_df, predicted_df, date_col, actual_col,
         path to save the figure
     fontsize : int; optional
         fontsize of the title
-    insample_line : bool; default False
-        if True, make line plot for in-sample; otherwise, make scatter plot for in-sample
+    line_plot : bool; default False
+        if True, make line plot for observations; otherwise, make scatter plot for observations
     markersize : int; optional
         point marker size
     lw : int; optional
@@ -68,6 +64,9 @@ def plot_predicted_data(training_actual_df, predicted_df, date_col, actual_col,
 
     if is_empty_dataframe(training_actual_df) or is_empty_dataframe(predicted_df):
         raise ValueError("No prediction data or training response to plot.")
+
+    if not is_ordered_datetime(predicted_df[date_col]):
+        raise ValueError("Prediction df dates is not ordered.")
 
     plot_confid = False
     if prediction_percentiles is None:
@@ -97,29 +96,36 @@ def plot_predicted_data(training_actual_df, predicted_df, date_col, actual_col,
 
     fig, ax = plt.subplots(facecolor='w', figsize=figsize)
 
-    if not insample_line:
-        ax.scatter(_training_actual_df[date_col].values,
-                _training_actual_df[actual_col].values,
-                marker='.', color='black', alpha=0.8, s=markersize,
-                label='train response')
-    else:
+    if line_plot:
         ax.plot(_training_actual_df[date_col].values,
                 _training_actual_df[actual_col].values,
                 marker=None, color='black', lw=lw, label='train response', linestyle=linestyle)
+    else:
+        ax.scatter(_training_actual_df[date_col].values,
+                   _training_actual_df[actual_col].values,
+                   marker='.', color='black', alpha=0.8, s=markersize,
+                   label='train response')
+
     ax.plot(_predicted_df[date_col].values,
             _predicted_df[pred_col].values,
-            marker=None, color='#12939A', lw=lw, label='prediction', linestyle=linestyle)
+            marker=None, color='#12939A', lw=lw, label=PredictionKeys.PREDICTION.value, linestyle=linestyle)
 
-    #vertical line seperate training and prediction
-    ax.axvline(x=_training_actual_df[date_col].values[-1], color='#1f77b4', linestyle='--')
+    # vertical line separate training and prediction
+    if _training_actual_df[date_col].values[-1] < _predicted_df[date_col].values[-1]:
+        ax.axvline(x=_training_actual_df[date_col].values[-1], color='#1f77b4', linestyle='--')
 
     if test_actual_df is not None:
         test_actual_df = test_actual_df.copy()
         test_actual_df[date_col] = pd.to_datetime(test_actual_df[date_col])
-        ax.scatter(test_actual_df[date_col].values,
-                   test_actual_df[actual_col].values,
-                   marker='.', color='#FF8C00', alpha=0.8, s=markersize,
-                   label='test response')
+        if line_plot:
+            ax.plot(test_actual_df[date_col].values,
+                    test_actual_df[actual_col].values,
+                    marker=None, color='#FF8C00', lw=lw, label='train response', linestyle=linestyle)
+        else:
+            ax.scatter(test_actual_df[date_col].values,
+                       test_actual_df[actual_col].values,
+                       marker='.', color='#FF8C00', alpha=0.8, s=markersize,
+                       label='test response')
 
     # prediction intervals
     if plot_confid:
@@ -176,9 +182,9 @@ def plot_predicted_components(predicted_df, date_col, prediction_percentiles=Non
     _predicted_df = predicted_df.copy()
     _predicted_df[date_col] = pd.to_datetime(_predicted_df[date_col])
     if plot_components is None:
-        plot_components = [PredictedComponents.TREND.value,
-                           PredictedComponents.SEASONALITY.value,
-                           PredictedComponents.REGRESSION.value]
+        plot_components = [PredictionKeys.TREND.value,
+                           PredictionKeys.SEASONALITY.value,
+                           PredictionKeys.REGRESSION.value]
 
     plot_components = [p for p in plot_components if p in _predicted_df.columns.tolist()]
     n_panels = len(plot_components)
@@ -278,8 +284,7 @@ def plot_posterior_params(mod, kind='density', n_bins=20, ci_level=.95,
     ------
     mod : orbit model object
     kind : str, {'density', 'trace', 'pair'}
-        which kind of plot to be made. Currently, trace plot may not represent the actual sample process for
-        different chainse since this information is not stored in orbit model objects.
+        which kind of plot to be made.
     n_bins : int; default 20
         number of bin, used in the histogram plotting
     ci_level : float, between 0 and 1
@@ -340,7 +345,7 @@ def plot_posterior_params(mod, kind='density', n_bins=20, ci_level=.95,
             mean = np.mean(samples)
             median = np.median(samples)
             cred_min, cred_max = np.percentile(samples, 100 * (1 - ci_level)/2), \
-                np.percentile(samples, 100 * (1 + ci_level)/2)
+                                 np.percentile(samples, 100 * (1 + ci_level)/2)
 
             sns.distplot(samples, bins=n_bins, kde_kws={'shade': True}, ax=axes[i], norm_hist=False)
             # sns.kdeplot(samples, shade=True, ax=axes[i])
@@ -417,61 +422,88 @@ def plot_posterior_params(mod, kind='density', n_bins=20, ci_level=.95,
     return axes
 
 
-def plot_ktr_lev_knots(actual_df, predicted_df,
-                       date_col, actual_col,
-                       level_knot_dates, level_knots,
-                       trend_col='trend',
-                       path=None, is_visible=True, title="",
-                       fontsize=16, markersize=150, figsize=(16, 8)):
-    """ Plot the fitted level knots along with the actual time series.
 
+
+
+def get_arviz_plot_dict(mod,
+                        incl_noise_params=False,
+                        incl_trend_params=False,
+                        incl_smooth_params=False):
+    """ This is a utility to prepare the plotting dictionary data for package arviz.
+    arviz will interpret each key as the name of a different random variable.
+    Each array should have shape (chains, draws, *shape).
+
+    See Also
+    --------
+    https://arviz-devs.github.io/arviz/index.html
+    """
+    if not ('MCMC' in str(mod.estimator) or 'VI' in str(mod.estimator)):
+        raise Exception("This utility works for model object with MCMC or VI inference only.")
+
+    posterior_samples = mod.get_posterior_samples()
+    if len(mod._regressor_col) > 0:
+        for i, regressor in enumerate(mod._regressor_col):
+            posterior_samples[regressor] = posterior_samples['beta'][:,i]
+    params_ = mod._regressor_col
+
+    if incl_noise_params:
+        params_ += ['obs_sigma']
+    if incl_trend_params:
+        params_ += ['gt_pow', 'lt_coef', 'gt_coef', 'gb', 'gl']
+    if incl_smooth_params:
+        params_ += ['lev_sm', 'slp_sm', 'sea_sm']
+
+    params_ = [x for x in params_ if x in posterior_samples.keys()]
+
+    for key in posterior_samples.copy().keys():
+        if key not in params_: del posterior_samples[key]
+
+    for key, val in posterior_samples.items():
+        posterior_samples[key] = val.reshape((mod.estimator.chains,
+                                              mod.estimator._num_sample_per_chain,
+                                              *val.shape[1:]))
+
+    return posterior_samples
+
+
+def plot_param_diagnostics(mod, incl_noise_params=False, incl_trend_params=False, incl_smooth_params=False,
+                           which='trace', **kwargs):
+    """
     Parameters
-    ----------
-    actual_df : pd.DataFrame
-        actual data frame including the actual response
-    predicted_df : pd.DateFrame
-        prediction data frame including the predicted components, which can be obtained by running
-        orbit.diagnostics.plot.plot_predicted_components
-    date_col : str
-        the date column name
-    actual_col : str
-        actual response column name
-    level_knot_dates : list
-        list of level knot dates
-    level_knots : list
-        list of fitted level knots
-    trend_col : str
-        trend column name in predicted_df
-    path : str; optional
-        path to save the figure
-    is_visible : boolean
-        whether we want to show the plot. If called from unittest, is_visible might = False.
-    title : str; optional
-        title of the plot
-    fontsize : int; optional
-        fontsize of the title
-    markersize : int; optional
-        knot marker size
-    figsize : tuple; optional
-        figsize pass through to `matplotlib.pyplot.figure()`
-   Returns
+    -----------
+    mod : orbit model object
+    which : str, {'density', 'trace', 'pair', 'autocorr', 'posterior', 'forest'}
+    incl_noise_params : bool
+        if plot noise parameters; default False
+    incl_trend_params : bool
+        if plot trend parameters; default False
+    incl_smooth_params : bool
+        if plot smoothing parameters; default False
+    **kwargs :
+        other parameters passed to arviz functions
+
+    Returns
     -------
         matplotlib axes object
     """
-    actuals = actual_df[actual_col]
-    # yhat = predicted_df[pred_col]
-    trend = predicted_df[trend_col]
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    ax.plot(actual_df[date_col], actuals, color='black', lw=1, alpha=0.5, label='actual')
-    ax.plot(actual_df[date_col], trend, color='blue', lw=1, alpha=0.5, label='level/trend')
-    ax.scatter(level_knot_dates, level_knots, color='green', lw=1, s=markersize, marker='^', label='level-knot')
-    ax.legend()
-    ax.grid(True, which='major', c='gray', ls='-', lw=1, alpha=0.5)
-    ax.set_title(title, fontsize=fontsize)
-    if path:
-        fig.savefig(path)
-    if is_visible:
-        plt.show()
+    posterior_samples = get_arviz_plot_dict(mod,
+                                            incl_noise_params=incl_noise_params,
+                                            incl_trend_params=incl_trend_params,
+                                            incl_smooth_params=incl_smooth_params)
+
+    if which == "trace":
+        axes = az.plot_trace(posterior_samples, **kwargs)
+    elif which == "density":
+        axes = az.plot_density(posterior_samples, **kwargs)
+    elif which == "posterior":
+        axes = az.plot_posterior(posterior_samples, **kwargs)
+    elif which == "pair":
+        axes = az.plot_pair(posterior_samples, **kwargs)
+    elif which == "autocorr":
+        axes = az.plot_autocorr(posterior_samples, **kwargs)
+    elif which == "forest":
+        axes = az.plot_forest(posterior_samples, **kwargs)
     else:
-        plt.close()
-    return ax
+        raise Exception("please use one of 'trace', 'density', 'posterior', 'pair', 'autocorr', 'forest' for kind.")
+
+    return axes
