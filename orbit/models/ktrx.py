@@ -927,8 +927,7 @@ class BaseKTRX(BaseTemplate):
 
     @staticmethod
     def _plot_regression_coefs(coef_df, knot_df=None, coef_df_lower=None, coef_df_upper=None,
-                               ncol=2, figsize=None,
-                               ylim=None, markersize=200):
+                               ncol=2, figsize=None, ylim=None, markersize=200):
         """Plot regression coefficients
         """
         # assume your first column is the date; this way can use a static method
