@@ -29,15 +29,6 @@ Welcome to Orbit's Documentation!
 
 .. toctree::
    :maxdepth: 1
-   :caption: Multiple Seasonality Model
-
-   tutorials/ktr1
-   tutorials/ktr2
-   tutorials/ktr3
-   tutorials/ktr4
-
-.. toctree::
-   :maxdepth: 1
    :caption: Validation
    :name: validation
 
